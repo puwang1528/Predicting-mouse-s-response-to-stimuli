@@ -1,0 +1,716 @@
+---
+title: "Predicting mouse's response to stimuli "
+author: "Purui Wang 917988370"
+output: html_document
+---
+
+# Abstract
+
+---
+
+In this project, I try to predict mouse's feedback type in each trial based on neural activity data and stimuli data. First, I conduct some exploratory data analysis, clean the raw data, and create a final dataset for modeling. Next, I employ some unsupervised learning methods such as clustering and PCA to study the shared patterns and difference in my dataset. Finally, I build three preditive models to predict the outcomes and choose one model that generate the highest accuracy rate for the test set.
+
+
+# 1 Introduction
+
+---
+
+In this project, I want to build a predictive model to forecast the feedback types of mice when they are exposed to stimuli (the left and right contrasts) in thousands of trials. 
+
+I conduct the analysis based on a subset of data collected by Steinmetz et al. (2019), which involved experiments on 10 mice over 39 sessions and each session comprised several hundred trials. During the experiments, visual stimuli were randomly presented to the mice on two screens positioned on either side of them. The stimuli varied in terms of contrast levels, which took values in 0, 0.25, 0.5, 1, with 0 indicating the absence of a stimulus. The mice were required to make decisions based on these visual stimuli by using a wheel controlled by their forepaws. Feedback in the form of a reward or penalty was subsequently administered based on the outcome of their decisions. Each trial in the dataset is characterized by five variables: feedback_type, contrast_left, contrast_right, time, spks, and brain_area. The feedback_type variable indicates the mouse's response for each trial, with 1 being success and -1 being failure. The contrast_left and contrast_right variables denote the contrast levels of the left and right stimuli, respectively. The time variable provides the centers of the time bins for spike train recordings. The spks variable represents the number of spikes of neurons in the visual cortex within each time bin, and the brain_area variable specifies the area of the brain where each neuron resides.
+
+ 
+# 2 Exploratory analysis
+
+---
+
+### Data structures across sessions
+
+I will first construct a data frame for all sessions and look at how session-level variable such as number of neurons, number of trials and success rate (defined as the average percentage of correct feedback type) vary across sessions. Second, I will build a data frame for all the trials and explore how trial-level variable such as stimuli conditions and feedback types vary across trials.
+
+```{r 1, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+rm(list = ls())
+library(ggplot2)
+library(psych)
+library(cowplot)
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(MASS)
+library(car)
+library(e1071)
+library(caret)
+library(pROC)
+library(randomForest)
+
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('./Data/session',i,'.rds',sep=''))
+  #print(session[[i]]$mouse_name)
+  #print(session[[i]]$date_exp)
+}
+
+## First, construct a dataframe for different sessions
+sessions_all <- matrix(NA, 18, 7)
+for(i in 1:18){
+  sessions_all[i, 1] <- i
+  sessions_all[i, 2] <- length(session[[i]]$brain_area)
+  sessions_all[i, 3] <- length(unique(session[[i]]$brain_area))
+  sessions_all[i, 4] <- length(session[[i]]$contrast_left)
+  sessions_all[i, 5] <- session[[i]]$mouse_name
+  sessions_all[i, 6] <- session[[i]]$date_exp
+  sessions_all[i, 7] <- round(mean(session[[i]]$feedback_type+1)/2, 2)
+}
+sessions_all <- as.data.frame(sessions_all)
+colnames(sessions_all) <- c("session","neurons", "brain_areas", "trials", "mouse", "date", "success_rate")
+
+sessions_all$session <- as.factor(as.numeric(sessions_all$session))
+sessions_all$neurons <- as.numeric(sessions_all$neurons)
+sessions_all$brain_areas <- as.numeric(sessions_all$brain_areas)
+sessions_all$trials <- as.numeric(sessions_all$trials)
+sessions_all$success_rate <- as.numeric(sessions_all$success_rate)
+
+ggplot(sessions_all, aes(x = session, y = neurons, fill = session)) + geom_bar(stat = "identity") + geom_text(aes(label = neurons), position = position_dodge(width = 0.9), size = 3, vjust = -0.25) + labs(title = "the number of neurons across sessions") + theme(legend.position="none") + theme(plot.title = element_text(hjust=0.5))
+
+ggplot(sessions_all, aes(x = session, y = trials, fill = session)) + geom_bar(stat = "identity") + geom_text(aes(label = trials), position = position_dodge(width = 0.9), size = 3, vjust = -0.25) + labs(title = "the number of trials across sessions") + theme(legend.position="none") + theme(plot.title = element_text(hjust=0.5))
+
+ggplot(sessions_all, aes(x = session, y = success_rate, fill = session)) + geom_bar(stat = "identity") + geom_text(aes(label = success_rate), position = position_dodge(width = 0.9), size = 3, vjust = -0.25) + labs(title = "success rate across sessions") + theme(legend.position="none") + theme(plot.title = element_text(hjust=0.5))
+
+## Second, construct a dataframe for all trials
+trials_all <- matrix(NA, sum(sessions_all$trials), 4)
+session_index <- matrix()
+contrast_left <- matrix()
+contrast_right <- matrix()
+feedback_type <- matrix()
+
+for(i in 1:18){
+  session_index <- append(session_index, rep(sessions_all$session[i], sessions_all$trials[i]))
+  contrast_left <- append(contrast_left, session[[i]]$contrast_left)
+  contrast_right <- append(contrast_right, session[[i]]$contrast_right)
+  feedback_type <- append(feedback_type, session[[i]]$feedback_type)
+}
+session_index <- session_index[-1]
+contrast_left <- contrast_left[-1]
+contrast_right <- contrast_right[-1]
+feedback_type <- feedback_type[-1]
+trials_all[, 1] <- session_index
+trials_all[, 2] <- contrast_left
+trials_all[, 3] <- contrast_right
+trials_all[, 4] <- feedback_type
+
+trials_all <- as.data.frame(trials_all)
+colnames(trials_all) <- c("session","contrast_left", "contrast_right", "feedback_type")
+
+rbind(
+  describe(sessions_all[,-c(1,5,6)])[,c(3,4,8,9,11,12)],
+  describe(trials_all[,-1])[,c(3,4,8,9,11,12)]
+)
+
+table(trials_all$session, trials_all$contrast_left)
+table(trials_all$session, trials_all$contrast_right)
+table(trials_all$session, trials_all$feedback_type)
+
+trials_all$contrast_left = as.factor(trials_all$contrast_left)
+trials_all$contrast_right = as.factor(trials_all$contrast_right)
+trials_all$feedback_type = as.factor(trials_all$feedback_type)
+
+ggplot(trials_all, aes(x = session, fill = contrast_left))+ geom_bar(position = 'fill') + labs(title = "distribution of left contrast levels across sessions") + theme_bw() + theme(plot.title = element_text(hjust=0.5)) 
+
+ggplot(trials_all, aes(x = session, fill = contrast_right))+ geom_bar(position = 'fill') + labs(title = "distribution of right contrast levels across sessions") + theme_bw() + theme(plot.title = element_text(hjust=0.5))
+
+ggplot(trials_all, aes(x = session, fill = feedback_type))+ geom_bar(position = 'fill') + labs(title = "distribution of feedback types across sessions") + theme_bw() + theme(plot.title = element_text(hjust=0.5))
+
+```
+
+The number of neurons, the number of trials and success rate vary across sessions. Session 16 has the minimum number of neurons, which is 474; session 4 has the maximum number of neurons, which is 1769. The average number of neurons across sessions is 905.83. Session 1 has the minimum number of trials, which is 114; session 10 has the maximum number of trials, which is 447. The average number of trials across sessions is 282.28. session 17 has the highest success rate, which is 0.83; Session 1 has the lowest success rate, which is 0.61. The average success rate across sessions is 0.71. The distribution of stimuli conditions is very similar among all the sessions. Almost half of the left and right contrast are 0, the mean of left contrast is 0.34 and the mean of right contrast is 0.32. Over 60% of the feedback type is 1 (success), the mean of the feedback type is 0.42.
+
+
+### Neural activities during each trial
+
+I create a neural activities dataset for all trials. Neural activities is defined as the average number of spikes in each trial. I try to investigate whether there are any apparent patterns in neural activities across trials. I also focus on some subsets of the sessions and explore how the neural activities differ among different brain areas in one section.
+
+```{r 2, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+neural_data <- matrix(NA, sum(as.numeric(sessions_all$trials)), 3)
+neural_data[, 1] <- trials_all$session
+
+ave_spks <- matrix()  # average number of spikes in each trial: sum over time, average over neurons
+time <- matrix()  # average centers of the time bins
+
+for(i in 1:18){
+  for(j in 1:sessions_all$trials[i]){
+    ave_spks <- append(ave_spks, mean(apply(session[[i]][["spks"]][[j]], 1, sum, na.rm=T)))
+    time <- append(time, mean(session[[i]][["time"]][[j]]))
+  }
+}
+
+ave_spks <- ave_spks[-1]
+time <- time[-1]
+neural_data[, 2] <- ave_spks
+neural_data[, 3] <- time
+
+neural_data <- as.data.frame(neural_data)
+colnames(neural_data) <- c("session", "ave_spks", "time")
+
+ggplot(data = neural_data) +
+      geom_point(mapping = aes(x = time, y = ave_spks)) + labs(title = "average number of spikes vs. time in all trials") + theme(plot.title = element_text(hjust=0.5))
+
+neural_data_s5 <- subset(neural_data, session == 5)
+neural_data_s12 <- subset(neural_data, session == 12)
+options(repr.plot.width = 10, repr.plot.height = 12)
+plot_grid(ggplot(data = neural_data_s5) +
+      geom_point(mapping = aes(x = time, y = ave_spks)), 
+      ggplot(data = neural_data_s12) +
+      geom_point(mapping = aes(x = time, y = ave_spks)), align = "h") + labs(title = "average number of spikes vs. time in trials of session 5 and session 12") + theme(plot.title = element_text(hjust=0.5))
+
+describe(neural_data[,-1])[,c(3,4,8,9,11,12)]
+
+ggplot(data = neural_data) + geom_histogram(mapping = aes(x = ave_spks), stat = "bin", bins = 60, fill = "darkgreen", color = 'gray') + labs(title = "histogram of average number of spikes") + theme_bw() + theme(plot.title = element_text(hjust=0.5))
+ 
+## no clear patterns across trials, look at trials in a single session next
+## take the average of spikes across neurons that live in the same brain area 
+
+r5 <- length(session[[5]]$feedback_type)
+c5 <- length(unique(session[[5]]$brain_area))
+neural_data_s5_new <- matrix(NA, r5, c5+1)
+
+for (i in 1 : r5) {
+  ave_spks_area <- tapply(apply(session[[5]]$spks[[i]], 1, sum), session[[5]]$brain_area, mean)
+  neural_data_s5_new[i, ] <- c(ave_spks_area, i)
+}
+
+colnames(neural_data_s5_new) = c(names(ave_spks_area), 'trial' )
+neural_data_s5_new <- as_tibble(neural_data_s5_new)
+describe(neural_data_s5_new[,-11])[,c(3,4,8,9,11,12)]
+
+area.col = rainbow(c5, alpha=0.7)
+plot(x=1,y=0, col='white',xlim=c(0, r5), ylim=c(0, 2.8), xlab="Trials",ylab="Average spike counts", main= "Spikes per brain area in Session5")
+
+for(i in 1:c5){
+  lines(y=neural_data_s5_new[[i]], x=neural_data_s5_new$trial ,col=area.col[i],lty=2,lwd=1)
+  lines(smooth.spline(neural_data_s5_new$trial, neural_data_s5_new[[i]]),col=area.col[i],lwd=3)
+  }
+legend("topright", 
+  legend = colnames(neural_data_s5_new)[1:c5], 
+  col = area.col, 
+  lty = 1, 
+  cex = 0.8
+)
+
+r12 <- length(session[[12]]$feedback_type)
+c12 <- length(unique(session[[12]]$brain_area))
+neural_data_s12_new <- matrix(NA, r12, c12+1)
+
+for (i in 1:r12) {
+  ave_spks_area <- tapply(apply(session[[12]]$spks[[i]], 1, sum), session[[12]]$brain_area, mean)
+  neural_data_s12_new[i, ] <- c(ave_spks_area, i)
+}
+
+colnames(neural_data_s12_new) = c(names(ave_spks_area), 'trial' )
+neural_data_s12_new <- as_tibble(neural_data_s12_new)
+describe(neural_data_s12_new[,-13])[,c(3,4,8,9,11,12)]
+
+area.col = rainbow(c12, alpha=0.7)
+plot(x=1,y=0, col='white',xlim=c(0, r12), ylim=c(0, 7), xlab="Trials",ylab="Average spike counts", main= "Spikes per brain area in Session12")
+
+for(i in 1:c12){
+  lines(y=neural_data_s12_new[[i]], x=neural_data_s12_new$trial,col=area.col[i],lty=2,lwd=1)
+  lines(smooth.spline(neural_data_s12_new$trial, neural_data_s12_new[[i]]),col=area.col[i],lwd=3)
+  }
+legend("topright", 
+  legend = colnames(neural_data_s12_new)[1:c12], 
+  col = area.col, 
+  lty = 1, 
+  cex = 0.8
+)
+
+```
+
+I calculate the average number of spikes of all neurons over time in each trial and average centers of the time bins. I find that there is no clear pattern between the average number of spikes and time for all trials and for some subsets of 18 sessions. In sum, for the average number of spikes of all neurons over time in all trials, the mean is 30.18, the minimum value is 6.5, the maximum number is 73.03. Since there are no clear patterns across trials, I further look at trials across different brain areas in a single session. I find that the average number of spikes vary greatly among different brain areas in session 5 and session 12. For example, in session 12, the average spikes counts of brain area LH has a minimum of 2.39 and a maximum of 6.89; the average spikes counts of brain area VISp has a minimum of 0.26 and a maximum of 2.14. 
+
+
+### Changes across trials
+
+I combine all trial-level data into one data frame and merge it with the session-level data frame. I aim to study how the neural activities change among different trials. Specifically, I plot and calculate the average number of spikes among trials with different left contrast levels, with different right contrast levels, and with different feedback types.
+
+```{r 3, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+trials_all$ave_spks = neural_data$ave_spks
+trials_all$time = neural_data$time
+data_all <- merge(trials_all, sessions_all, by.x = 'session', by.y = 'session')
+
+ggplot(trials_all, aes(y= ave_spks, x = "", fill = contrast_left)) + geom_boxplot()+ theme_bw() + xlab(" ") + labs(title = "average number of spikes across trials with different left contrast levels") + theme(plot.title = element_text(hjust=0.5)) 
+
+ggplot(trials_all, aes(y= ave_spks, x = "", fill = contrast_right)) + geom_boxplot()+ theme_bw() + xlab(" ") + labs(title = "average number of spikes across trials with different right contrast levels") + theme(plot.title = element_text(hjust=0.5))
+
+ggplot(trials_all, aes(y= ave_spks, x = "", fill = feedback_type)) +  geom_boxplot()+ theme_bw() + xlab(" ") + labs(title = "average number of spikes across trials with different feedback types") + theme(plot.title = element_text(hjust=0.5))
+ 
+aggregate(trials_all$ave_spks, list(trials_all$contrast_left), mean)
+aggregate(trials_all$ave_spks, list(trials_all$contrast_right), mean)
+aggregate(trials_all$ave_spks, list(trials_all$feedback_type), mean)
+
+```
+
+The average number of spikes of all neurons over time across trial does not differ significantly with respect to left contrast but seems to increase with contrast of the right stimulus. The average number of spikes is 28.51278 when right contrast is 0, 30.59977 when right contrast is 0.25, 31.28958 when right contrast is 0.5, 32.82656 when right contrast is 1. The average number of spikes also differs between different feedback type, 28.73747 for failure and 30.76993 for success. Furthermore, I conduct PCA analysis for trials data and find that all the five variables matter for predicting feedback type and I need at least 4 components to explain at least 80% proportion of variance.
+
+
+### Homogeneity and heterogeneity across sessions and mice
+
+I further compare the mean and standard deviation of the average number of spikes vary among sections and mice. I also look at how various variables differ among different mice.
+
+```{r 4, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+cbind(
+aggregate(data_all$ave_spks, list(data_all$session), mean),
+aggregate(data_all$ave_spks, list(data_all$session), sd))
+
+cbind(aggregate(data_all$ave_spks, list(data_all$mouse), mean),
+aggregate(data_all$ave_spks, list(data_all$mouse), sd))
+
+ggplot(data_all, aes(x = mouse, fill = feedback_type))+ geom_bar(position = 'fill') + theme_bw() + labs(title = "distribution of feedback types across mice") + theme(plot.title = element_text(hjust=0.5))
+
+ggplot(data_all, aes(x = mouse, fill = contrast_left))+ geom_bar(position = 'fill') + theme_bw() + theme(plot.title = element_text(hjust=0.5)) + labs(title = "distribution of left contrast levels across mice") 
+
+ggplot(data_all, aes(x = mouse, fill = contrast_right))+ geom_bar(position = 'fill') + theme_bw() + labs(title = "distribution of right contrast levels across mice") + theme(plot.title = element_text(hjust=0.5))
+```
+
+First, the mean of the average spikes differ across sections, section 6 has the minimum value of 0.663 and section 13 has the maximum value of 2.458. The standard deviation of average spikes does not vary much across sections. Second, the mean of the average spikes across mice ranges from 0.997 to 1.691; the standard deviation of the average spikes across mice ranges from 0.348 to 0.511. Finally, for mouse Lederberg, the probabilty of having the correct response is about 75%, which is highest compared to other mice. The probabilty of having the correct response is larger than 60% among all mice. The distribution of left and right contrast levels is very similar across mice, with about 50% of the contrast level being 0, 20% being 1, 15% being 0.25 and 15% being 0.5.
+
+# 3 Data integration
+
+---
+
+In the previous section, I average the number of spikes across all neurons for each trial to eliminate the heterogeneity in neurons. In this section, I will utilize two unsupervised learning methods (clustering and PCA) to further integrate data.
+
+### clustering: K-Means
+
+```{r 5.1, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+Kdata <- trials_all[,c(5,6)]
+
+tot.withinss <- vector("numeric", length = 10)
+for (i in 1:10){
+    kDet <- kmeans(Kdata, i)
+    tot.withinss[i] <- kDet$tot.withinss
+}
+
+ggplot(as.data.frame(tot.withinss), aes(x = seq(1,10), y = tot.withinss)) + 
+    geom_point(col = "#F8766D") +    
+    geom_line(col = "#F8766D") + 
+    theme(axis.title.x.bottom = element_blank()) +
+    ylab("Within-cluster Sum of Squares") +
+    xlab("Number of Clusters") +
+    ggtitle("Elbow K Estimation")
+
+### k = 5
+trialClusters <- kmeans(Kdata, 5)
+trialClusters
+
+ggplot(Kdata, aes(x = ave_spks, y = time)) + 
+    geom_point(stat = "identity", aes(color = as.factor(trialClusters$cluster))) +
+    scale_color_discrete(name=" ",
+                         breaks=c("1", "2", "3", "4", "5"),
+                         labels=c("Cluster 1", "Cluster 2", "Cluster 3", "Cluster 4", "Cluster 5")) +
+    ggtitle("Trials Segments", subtitle = "K-means Clustering")
+
+```
+
+The above plot shows the distribution of the 5 clusters. I do not detect obvious segments from the plot, e.g. clusters 2, 3, 4, 5 are almost same with respect to ave_spks. Therefore, I will not extract some shared patterns from K-means clustering. Cluster 1 shows that trials with relatively high time bins on average have smaller average spikes. (Note: I also try K-means clustering with other predictor variable using the entire dataset (data_all) but did not find any clear segments.)
+
+### PCA
+
+```{r 5.2, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+trials_all$contrast_left <- as.numeric(trials_all$contrast_left)
+trials_all$contrast_right <- as.numeric(trials_all$contrast_right)
+trials_all$feedback_type <- as.numeric(trials_all$feedback_type)
+trials_all.pca <- prcomp(trials_all[, -4], center = TRUE, scale. = TRUE)
+
+summary(trials_all.pca)
+# plot(trials_all.pca, type="l", ylim = c(0.7, 1.2), xlim = c(1, 5), main = "top five PCs")
+
+library(factoextra)
+library(ggpubr)
+fviz_eig(trials_all.pca, addlabels=TRUE, ylim = c(0, 30), geom = c("bar", "line"), barfill = "pink", barcolor="grey",linecolor = "red", ncp=10)+
+labs(title = "Feedback All Variances - PCA",
+         x = "Principal Components", y = "% of variances")
+
+trials.all_var <- get_pca_var(trials_all.pca)
+trials.all_var
+
+library(corrplot)
+## Correlation between variables and PCA
+corrplot(trials.all_var$cos2, is.corr=FALSE) 
+## highlight the most contributing variables for each components
+corrplot(trials.all_var$contrib, is.corr=FALSE)    
+
+
+## Contributions of variables to PC1 & PC2
+library(gridExtra)
+p1 <- fviz_contrib(trials_all.pca, choice="var", axes=1, fill="pink", color="grey", top=10)
+p2 <- fviz_contrib(trials_all.pca, choice="var", axes=2, fill="skyblue", color="grey", top=10)
+grid.arrange(p1,p2,ncol=2)
+```
+
+The first 2 PCs explain about 45% of variability and the first 4 PCs explain about 84.53% of variability. The third PC has the strongest correlation with predictor variable session. contrast_right and ave_spks contribute most to the first PC. time and contrast_left contribute most to the second PC.
+
+
+# 4 Predictive modeling
+
+---
+
+In this section, I split the final dataset into a traning set (70%) and a test test (30%). I employ three methods (logistic regression, decision tree and random forest) to build a prediction model to predict the outcome (i.e., feedback types). In the end, I campare the performance from three predictive modeling.
+
+### Start with Logistic Regression
+```{r 7.1, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+data_all$feedback <- as.factor(ifelse(data_all$feedback_type == -1, 0, 1))
+data_all <- data_all[, -4]
+set.seed(123)
+indices = sample(nrow(data_all), 0.7*nrow(data_all))
+train = data_all[indices,]
+test = data_all[-indices,]
+
+model_1 = glm(feedback ~ ., data = train, family = "binomial")
+summary(model_1)
+
+## Using stepAIC for variable selection
+model_2<- stepAIC(model_1, direction="both")
+summary(model_2)
+vif(model_2)
+
+## Removing contrast_left due to high p-value 
+model_3 <- glm(formula = feedback ~ contrast_right + ave_spks + 
+    time + date, family = "binomial", data = train)
+summary(model_3)
+vif(model_3)  # detect multicollinearity between predictor variables
+
+## model_3 all has significant variables
+final_model <- model_3
+
+## model evaluation
+glm.pred <- predict(final_model, type = "response", newdata = test[,-12])
+summary(glm.pred)
+test$prob <- glm.pred
+
+pred_feedback <- factor(ifelse(glm.pred >= 0.50, "Success", "Failure"))
+actual_feedback <- factor(ifelse(test$feedback == 1, "Success", "Failure"))
+table(actual_feedback, pred_feedback)
+
+cutoff_feedback <- factor(ifelse(glm.pred >=0.50, "Success", "Failure"))
+conf_final <- confusionMatrix(cutoff_feedback, actual_feedback, positive = "Success")
+accuracy <- conf_final$overall[1]
+sensitivity <- conf_final$byClass[1]
+specificity <- conf_final$byClass[2]
+accuracy
+sensitivity
+specificity
+
+```
+
+when using a cutoff of 0.50, I obtain a good accuracy and sensitivity, but the specificity is very low. Hence, I need to find the optimal probalility cutoff.
+
+```{r 7.2, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+perform_fn <- function(cutoff) 
+{
+  predicted_feedback <- factor(ifelse(glm.pred >= cutoff, "Success", "Failure"))
+  conf <- confusionMatrix(predicted_feedback, actual_feedback, positive = "Success")
+  accuray <- conf$overall[1]
+  sensitivity <- conf$byClass[1]
+  specificity <- conf$byClass[2]
+  out <- t(as.matrix(c(sensitivity, specificity, accuray))) 
+  colnames(out) <- c("sensitivity", "specificity", "accuracy")
+  return(out)
+}
+
+options(repr.plot.width =8, repr.plot.height =6)
+summary(glm.pred)
+s = seq(0.01,0.80,length=100)
+OUT = matrix(0,100,3)
+
+for(i in 1:100)
+{
+  OUT[i,] = perform_fn(s[i])
+} 
+
+plot(s, OUT[,1],xlab="Cutoff",ylab="Value",cex.lab=1.5,cex.axis=1.5,ylim=c(0,1),
+     type="l",lwd=2,axes=FALSE,col=2)
+axis(1,seq(0,1,length=5),seq(0,1,length=5),cex.lab=1.5)
+axis(2,seq(0,1,length=5),seq(0,1,length=5),cex.lab=1.5)
+lines(s,OUT[,2],col="darkgreen",lwd=2)
+lines(s,OUT[,3],col=4,lwd=2)
+box()
+legend("left",col=c(2,"darkgreen",4,"darkred"),text.font =3,inset = 0.02,
+       box.lty=0,cex = 0.8, 
+       lwd=c(2,2,2,2),c("Sensitivity","Specificity","Accuracy"))
+abline(v = 0.32, col="red", lwd=1, lty=2)
+axis(1, at = seq(0.1, 1, by = 0.1))
+
+# choose a cutoff value of 0.69 for final model,
+cutoff_feedback <- factor(ifelse(glm.pred >= 0.69, "Success", "Failure"))
+conf_final <- confusionMatrix(cutoff_feedback, actual_feedback, positive = "Success")
+accuracy <- conf_final$overall[1]
+sensitivity <- conf_final$byClass[1]
+specificity <- conf_final$byClass[2]
+accuracy
+sensitivity
+specificity
+```
+
+### decision tree
+```{r 7.3, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+set.seed(123)
+indices = sample(nrow(data_all), 0.7*nrow(data_all))
+train = data_all[indices,]
+test = data_all[-indices,]
+
+options(repr.plot.width = 10, repr.plot.height = 8)
+library(rpart)
+library(rpart.plot)
+
+## Training
+model.tree = rpart(feedback ~., data = train, method = "class")
+summary(model.tree)
+
+## Predicting 
+tree.pred <- predict(model.tree,type = "class", newdata = test[,-12])
+confusionMatrix(test$feedback, tree.pred)
+
+pred_feedback <- factor(ifelse(tree.pred == 1, "Success", "Failure"))
+conf_tree <- confusionMatrix(pred_feedback, actual_feedback, positive = "Success")
+accuracy <- conf_tree$overall[1]
+sensitivity <- conf_tree$byClass[1]
+specificity <- conf_tree$byClass[2]
+accuracy
+sensitivity
+specificity
+```
+
+### random forest
+```{r 7.4, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+set.seed(123)
+indices = sample(nrow(data_all), 0.7*nrow(data_all))
+train = data_all[indices,]
+test = data_all[-indices,]
+
+model.rf <- randomForest(feedback ~ ., data=train, proximity=FALSE,importance = FALSE,
+                        ntree=500, mtry=4, do.trace=FALSE)
+model.rf
+
+rf.pred <- predict(model.rf, newdata = test[,-12])
+table(rf.pred, test$feedback)
+
+confusionMatrix(test$feedback, rf.pred)
+
+varImpPlot(model.rf)
+
+pred_feedback <- factor(ifelse(rf.pred == 1, "Success", "Failure"))
+conf_rf <- confusionMatrix(pred_feedback, actual_feedback, positive = "Success")
+accuracy <- conf_rf$overall[1]
+sensitivity <- conf_rf$byClass[1]
+specificity <- conf_rf$byClass[2]
+accuracy
+sensitivity
+specificity
+```
+
+### comparison 
+```{r 7.5, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+options(repr.plot.width =10, repr.plot.height = 8)
+
+glm.roc <- roc(response = test$feedback, predictor = as.numeric(glm.pred))
+tree.roc <- roc(response = test$feedback, predictor = as.numeric(tree.pred))
+rf.roc <- roc(response = test$feedback, predictor = as.numeric(rf.pred))
+
+plot(glm.roc, legacy.axes = TRUE, print.auc.y = 1.0, print.auc = TRUE)
+plot(tree.roc, col = "blue", add = TRUE, print.auc.y = 0.65, print.auc = TRUE)
+plot(rf.roc, col = "red" , add = TRUE, print.auc.y = 0.85, print.auc = TRUE)
+legend("bottom", c("Random Forest", "Decision Tree", "Logistic"),
+       lty = c(1,1), lwd = c(2, 2), col = c("red", "blue", "black"), cex = 0.75)
+
+```
+
+A brief summary of all the models:
+
+Logistic Regression: accuracy 67.80%, sensitivity 72.55%, specificity 56.21%.
+
+Decision Tree: accuracy 73.77%, sensitivity 98.15%, specificity 14.22%.
+
+Random Forest: accuracy 75.21%, sensitivity 90.11%, specificity 38.83%
+
+
+# 5 Prediction performance on the test sets
+
+---
+
+I this section, I will choose use the three models above to predict feedback types for the test sets and compare their performance.
+
+### clean the test set
+```{r 8.1, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+test_data = list()
+for(i in 1:2){
+  test_data[[i]]=readRDS(paste('./test/test',i,'.rds',sep=''))
+}
+
+test1 <- matrix(NA, 2, 7)
+for(i in 1:2){
+  test1[i, 1] <- i
+  test1[i, 2] <- length(test_data[[i]]$brain_area)
+  test1[i, 3] <- length(unique(test_data[[i]]$brain_area))
+  test1[i, 4] <- length(test_data[[i]]$contrast_left)
+  test1[i, 5] <- test_data[[i]]$mouse_name
+  test1[i, 6] <- test_data[[i]]$date_exp
+  test1[i, 7] <- round(mean(test_data[[i]]$feedback_type+1)/2, 2)
+}
+test1 <- as.data.frame(test1)
+colnames(test1) <- c("session","neurons", "brain_areas", "trials", "mouse", "date", "success_rate")
+
+test1$session <- as.factor(as.numeric(test1$session))
+test1$neurons <- as.numeric(test1$neurons)
+test1$brain_areas <- as.numeric(test1$brain_areas)
+test1$trials <- as.numeric(test1$trials)
+test1$success_rate <- as.numeric(test1$success_rate)
+
+test2 <- matrix(NA, sum(test1$trials), 4)
+session_index <- matrix()
+contrast_left <- matrix()
+contrast_right <- matrix()
+feedback_type <- matrix()
+
+for(i in 1:2){
+  session_index <- append(session_index, rep(test1$session[i], test1$trials[i]))
+  contrast_left <- append(contrast_left, test_data[[i]]$contrast_left)
+  contrast_right <- append(contrast_right, test_data[[i]]$contrast_right)
+  feedback_type <- append(feedback_type, test_data[[i]]$feedback_type)
+}
+session_index <- session_index[-1]
+contrast_left <- contrast_left[-1]
+contrast_right <- contrast_right[-1]
+feedback_type <- feedback_type[-1]
+test2[, 1] <- session_index
+test2[, 2] <- contrast_left
+test2[, 3] <- contrast_right
+test2[, 4] <- feedback_type
+
+test2 <- as.data.frame(test2)
+colnames(test2) <- c("session","contrast_left", "contrast_right", "feedback_type")
+
+test2$contrast_left = as.factor(test2$contrast_left)
+test2$contrast_right = as.factor(test2$contrast_right)
+test2$feedback_type = as.factor(test2$feedback_type)
+
+test3 <- matrix(NA, sum(test1$trials), 3)
+test3[, 1] <- test2$session
+
+ave_spks <- matrix()  # average number of spikes in each trial: sum over time, average over neurons
+time <- matrix()  # average centers of the time bins
+
+for(i in 1:2){
+  for(j in 1:test1$trials[i]){
+    ave_spks <- append(ave_spks, mean(apply(test_data[[i]][["spks"]][[j]], 1, sum, na.rm=T)))
+    time <- append(time, mean(test_data[[i]][["time"]][[j]]))
+  }
+}
+
+ave_spks <- ave_spks[-1]
+time <- time[-1]
+test3[, 2] <- ave_spks
+test3[, 3] <- time
+
+test3 <- as.data.frame(test3)
+colnames(test3) <- c("session", "ave_spks", "time")
+
+test2$ave_spks = test3$ave_spks
+test2$time = test3$time
+test_all <- merge(test2, test1, by.x = 'session', by.y = 'session')
+
+test_all$feedback <- as.factor(ifelse(test_all$feedback_type == -1, 0, 1))
+test_all <- test_all[, -4]
+```
+
+
+## Logistic Regression
+
+```{r 8.2, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+glm.pred <- predict(final_model, type = "response", newdata = test_all[,-12])
+summary(glm.pred)
+
+test_all$prob <- glm.pred
+
+pred_feedback <- factor(ifelse(glm.pred >= 0.50, "Success", "Failure"))
+actual_feedback <- factor(ifelse(test_all$feedback == 1, "Success", "Failure"))
+table(actual_feedback, pred_feedback)
+
+cutoff_feedback <- factor(ifelse(glm.pred >=0.50, "Success", "Failure"))
+conf_final <- confusionMatrix(cutoff_feedback, actual_feedback, positive = "Success")
+accuracy <- conf_final$overall[1]
+sensitivity <- conf_final$byClass[1]
+specificity <- conf_final$byClass[2]
+accuracy
+sensitivity
+specificity
+```
+
+
+### Decision Tree
+
+```{r 8.3, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+
+tree.pred <- predict(model.tree,type = "class", newdata = test_all[,-12])
+confusionMatrix(test_all$feedback, tree.pred)
+
+pred_feedback <- factor(ifelse(tree.pred == 1, "Success", "Failure"))
+conf_tree <- confusionMatrix(pred_feedback, actual_feedback, positive = "Success")
+accuracy <- conf_tree$overall[1]
+sensitivity <- conf_tree$byClass[1]
+specificity <- conf_tree$byClass[2]
+accuracy
+sensitivity
+specificity
+```
+
+### Random Forest
+
+```{r 8.4, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+rf.pred <- predict(model.rf, newdata = test_all[,-12])
+confusionMatrix(test_all$feedback, rf.pred)
+
+pred_feedback <- factor(ifelse(rf.pred == 1, "Success", "Failure"))
+conf_rf <- confusionMatrix(pred_feedback, actual_feedback, positive = "Success")
+accuracy <- conf_rf$overall[1]
+sensitivity <- conf_rf$byClass[1]
+specificity <- conf_rf$byClass[2]
+accuracy
+sensitivity
+specificity
+```
+
+
+### Comparison
+
+```{r 8.5, echo=TRUE, eval=TRUE, message = FALSE, warning=FALSE}
+options(repr.plot.width =10, repr.plot.height = 8)
+
+glm.roc <- roc(response = test_all$feedback, predictor = as.numeric(glm.pred))
+tree.roc <- roc(response = test_all$feedback, predictor = as.numeric(tree.pred))
+rf.roc <- roc(response = test_all$feedback, predictor = as.numeric(rf.pred))
+
+plot(glm.roc, legacy.axes = TRUE, print.auc.y = 1.0, print.auc = TRUE)
+plot(tree.roc, col = "blue", add = TRUE, print.auc.y = 0.65, print.auc = TRUE)
+plot(rf.roc, col = "red" , add = TRUE, print.auc.y = 0.85, print.auc = TRUE)
+legend("bottom", c("Random Forest", "Decision Tree", "Logistic"),
+       lty = c(1,1), lwd = c(2, 2), col = c("red", "blue", "black"), cex = 0.75)
+
+```
+
+I will choose decision tree model as it gives the highest accuracy rate, which 76%. (Note: I obtain lower accuracy rate for test set overall when I use the entire data frame instead of 70% of data_all as train set, so I keep using 70% of data_all to train predictive model and use this model to predict feedback for test set.)
+
+# 6 Discussion
+
+---
+
+I use three machine learning methods to predict the feedback types for test set: logistic regression, decision tree and random forest. I find that decision tree model generates the highest accuracy rate and its sensitivity is also very high, but this model has a very low specificity value, which is only 0.2. Similarly, accuracy and sensitivity of logistic regression are relatively high, which are 0.735 and 0.91 respectively, but its specificity is as low as 0.273. For random forest, accuracy is 0.72, sensitivity is 0.88, specificity is 0.29. Logistic regression has an AUC value of 0.63, decision tree has an AUC of 0.586 and random forest has an AUC of 0.587.
+
+# Reference {-}
+
+
+Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al. Distributed coding of choice, action and engagement across the mouse brain. Nature 576, 266–273 (2019). https://doi.org/10.1038/s41586-019-1787-x
+
+AUC plots: http://rstudio-pubs-static.s3.amazonaws.com/277278_427ca6a7ce7c4eb688506efc7a6c2435.html
+
+PCA plots: https://www.kaggle.com/code/mirichoi0218/classification-breast-cancer-or-not-with-15-ml
+
